@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+launcher_settings.json
+Thumbs.db
+.DS_Store
+.venv_build/
+_build_tools/
+_tmp/
+build/
+dist/
+*.spec
+LICENSE.txt
