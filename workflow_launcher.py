@@ -227,7 +227,7 @@ class WorkflowLauncher:
         self.resume_button.pack(side=tk.LEFT, padx=(8, 0))
         self.retry_button = tk.Button(button_frame, text="再修再审", width=14, command=self.retry_after_reject_workflow)
         self.retry_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.restart_button = tk.Button(button_frame, text="开始新任务", width=14, command=self.restart_workflow)
+        self.restart_button = tk.Button(button_frame, text="新任务草稿", width=14, command=self.restart_workflow)
         self.restart_button.pack(side=tk.LEFT, padx=(8, 0))
         self.stop_button = tk.Button(button_frame, text="停止当前任务", width=14, command=self.stop_workflow)
         self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
@@ -289,6 +289,10 @@ class WorkflowLauncher:
             self.project_var.set(selected)
             self.restore_workflow_context(force=True)
             self.update_artifact_buttons()
+            if self.workflow_dir().exists():
+                self.status_var.set("已加载当前任务；要继续请点“继续上次任务”，要新开任务请点“新任务草稿”")
+            else:
+                self.status_var.set("就绪")
 
     def get_code_dirs(self) -> list[str]:
         return [self.code_dir_listbox.get(i) for i in range(self.code_dir_listbox.size())]
@@ -356,6 +360,10 @@ class WorkflowLauncher:
         self.log_text.configure(state=tk.NORMAL)
         self.log_text.delete("1.0", tk.END)
         self.log_text.configure(state=tk.DISABLED)
+
+    def set_task_text(self, text: str) -> None:
+        self.task_text.delete("1.0", tk.END)
+        self.task_text.insert("1.0", text)
 
     def save_current_settings(self) -> None:
         save_settings(
@@ -845,7 +853,7 @@ class WorkflowLauncher:
         if self.workflow_dir().exists():
             messagebox.showinfo(
                 "提示",
-                "当前工程目录下已经存在 workflow。\n\n如果你要继续原任务，请点击“继续上次任务”或“再修再审”；如果你要开始一个新的任务，请点击“开始新任务”。",
+                "当前工程目录下已经存在 workflow。\n\n如果你要继续原任务，请点击“继续上次任务”或“再修再审”；如果你要开始一个新的任务，请先点击“新任务草稿”，修改任务描述后再点击“开始运行”。",
             )
             return
         cmd = self.build_command(resume=False, retry_final_reject=False)
@@ -869,15 +877,11 @@ class WorkflowLauncher:
             self.start_process(cmd, "再修再审")
 
     def restart_workflow(self) -> None:
-        cmd = self.build_command(resume=False, retry_final_reject=False)
-        if cmd is None:
-            return
-
         workflow_dir = self.workflow_dir()
         if workflow_dir.exists():
             answer = messagebox.askyesno(
                 "确认",
-                "开始新任务会先把当前 workflow 归档到 workflow_history，再创建新的 workflow。继续吗？",
+                "准备新任务会先把当前 workflow 归档到 workflow_history，然后清空当前任务名称和任务描述。\n\n这个操作不会立即运行。继续吗？",
             )
             if not answer:
                 return
@@ -887,10 +891,20 @@ class WorkflowLauncher:
                 messagebox.showerror("归档失败", f"无法归档旧 workflow：{exc}")
                 return
             self.clear_log()
-            self.update_artifact_buttons()
             if archived_to is not None:
                 self.append_log(f"已归档旧 workflow 到: {archived_to}\n")
-        self.start_process(cmd, "开始新任务")
+
+        self.task_label_var.set("")
+        self.set_task_text(DEFAULT_TASK)
+        self.update_artifact_buttons()
+        self.set_pending_stage_status("已准备新任务草稿")
+        self.status_var.set("已切换到新任务草稿，请先修改任务描述，再点击“开始运行”")
+        self.append_log("\n=== 已切换到新任务草稿 ===\n")
+        self.append_log("当前不会自动运行，请修改任务描述后，再点击“开始运行”。\n")
+        self.task_text.focus_set()
+        self.task_text.mark_set(tk.INSERT, "1.0")
+        self.task_text.see(tk.INSERT)
+        messagebox.showinfo("已准备新任务", "已经切换到新任务草稿。\n\n请修改任务描述后，再点击“开始运行”。")
 
     def archive_existing_workflow(self) -> Path | None:
         workflow_dir = self.workflow_dir()
@@ -986,6 +1000,8 @@ class WorkflowLauncher:
 
         manifest = self.read_manifest() or {}
         manifest_status = str(manifest.get("status", ""))
+        commit_stage = manifest.get("stages", {}).get("commit", {})
+        commit_stage_status = str(commit_stage.get("status", "") or "")
 
         if manifest_status == "needs_user_decision" or returncode == 2:
             self.status_var.set("等待你决定是否再修再审")
@@ -1012,8 +1028,12 @@ class WorkflowLauncher:
             self.append_log("\n=== 任务完成 ===\n")
             final_review = final_review_path.read_text(encoding="utf-8", errors="replace") if final_review_path.exists() else ""
             if "APPROVED" in final_review.upper():
-                if self.commit_on_success_var.get() and commit_path.exists():
-                    messagebox.showinfo("任务完成", "最终审查通过，并且 Codex 已执行提交阶段。")
+                if self.commit_on_success_var.get() and commit_stage_status == "completed":
+                    messagebox.showinfo("任务完成", "最终审查通过，并且已确认由 Codex 真正创建了 git commit。")
+                elif self.commit_on_success_var.get() and commit_stage_status == "skipped":
+                    messagebox.showinfo("任务完成", "最终审查通过，但没有检测到可提交的代码改动，所以跳过了 commit 阶段。")
+                elif self.commit_on_success_var.get() and commit_path.exists():
+                    messagebox.showwarning("任务完成", "最终审查通过，但 commit 阶段没有被标记为成功，请打开 06_codex_commit.md 检查原因。")
                 else:
                     messagebox.showinfo("任务完成", "最终审查通过，任务已完成。")
             else:
@@ -1021,7 +1041,9 @@ class WorkflowLauncher:
         else:
             self.status_var.set(f"运行失败，退出码 {returncode}")
             self.append_log(f"\n=== 任务失败，退出码 {returncode} ===\n")
-            if final_review_path.exists() and "REJECTED" in final_review_path.read_text(encoding="utf-8", errors="replace").upper():
+            if commit_stage_status == "failed":
+                messagebox.showerror("任务失败", "最终审查虽然通过了，但 Codex 没有真正完成 git commit。请打开 06_codex_commit.md 查看原因。")
+            elif final_review_path.exists() and "REJECTED" in final_review_path.read_text(encoding="utf-8", errors="replace").upper():
                 messagebox.showerror("任务失败", "最终审查未通过，结果为 REJECTED。")
             else:
                 messagebox.showerror("任务失败", f"任务失败，退出码 {returncode}。")

@@ -390,8 +390,10 @@ class WorkflowRunner:
             str(self.project_dir),
             "--output-last-message",
             str(output_path),
+            "--ask-for-approval",
+            "never",
             "--sandbox",
-            "workspace-write",
+            "danger-full-access",
         ]
         if self.args.codex_model:
             args.extend(["--model", self.args.codex_model])
@@ -441,6 +443,23 @@ class WorkflowRunner:
 
     def relative_code_dir_args(self) -> list[str]:
         return [str(path.relative_to(self.project_dir)) for path in self.code_dirs]
+
+    def git_status_porcelain(self, *paths: str) -> CommandResult:
+        args = ["git", "status", "--porcelain"]
+        if paths:
+            args.extend(["--", *paths])
+        return self.run_command(args, cwd=self.project_dir)
+
+    def ensure_git_repository_for_commit(self) -> None:
+        result = self.run_command(["git", "rev-parse", "--is-inside-work-tree"], cwd=self.project_dir)
+        if result.returncode != 0 or result.stdout.strip().lower() != "true":
+            raise WorkflowError("Commit stage requires a valid git repository in the selected project directory.")
+
+    def git_head_commit(self) -> str:
+        result = self.run_command(["git", "rev-parse", "HEAD"], cwd=self.project_dir)
+        if result.returncode != 0:
+            return ""
+        return result.stdout.strip()
 
     def run_plan_stage(self) -> str:
         if self.should_skip("plan", PLAN_FILE):
@@ -605,24 +624,50 @@ class WorkflowRunner:
         if self.should_skip("commit", COMMIT_FILE):
             return read_text_if_exists(self.artifact_path(COMMIT_FILE))
 
+        self.ensure_git_repository_for_commit()
+
         if not self.has_git_changes():
             message = "No repository changes were detected, so the commit stage was skipped."
             self.write_artifact(COMMIT_FILE, message)
             self.set_stage("commit", "skipped", reason="no changes")
             return message
 
+        head_before = self.git_head_commit()
         prompt = self.build_commit_prompt(plan_text, final_review_text)
         self.write_artifact(PROMPT_FILES["commit"], prompt)
         output_path = self.artifact_path(COMMIT_FILE)
         self.set_stage("commit", "running", artifact=str(output_path))
         result = self.run_command(self.build_codex_commit_args(output_path), cwd=self.project_dir, stdin_text=prompt)
         commit_text = read_text_if_exists(output_path) or result.stdout
-        if result.returncode != 0 or not commit_text.strip():
-            self.set_stage("commit", "failed", returncode=result.returncode)
-            raise WorkflowError("Codex commit stage failed")
-        self.write_artifact(COMMIT_FILE, commit_text)
-        self.set_stage("commit", "completed", returncode=result.returncode)
-        return commit_text
+        head_after = self.git_head_commit()
+
+        if head_after and head_after != head_before:
+            if not commit_text.strip():
+                commit_text = (
+                    "Codex created a git commit, but did not return a commit summary.\n\n"
+                    f"Commit hash: {head_after}\n"
+                )
+            self.write_artifact(COMMIT_FILE, commit_text)
+            self.set_stage(
+                "commit",
+                "completed",
+                returncode=result.returncode,
+                previous_head=head_before or None,
+                commit_hash=head_after,
+            )
+            return commit_text
+
+        failure_report = self.build_commit_failure_report(commit_text, result, head_before, head_after)
+        self.write_artifact(COMMIT_FILE, failure_report)
+        self.set_stage(
+            "commit",
+            "failed",
+            returncode=result.returncode,
+            reason="no_real_commit_created",
+            previous_head=head_before or None,
+            current_head=head_after or None,
+        )
+        raise WorkflowError("Codex commit stage did not create a real git commit. Approval may have been denied.")
 
     def build_plan_prompt(self) -> str:
         return (
@@ -750,6 +795,7 @@ class WorkflowRunner:
             "You are Codex. The coding task has passed final review and now you need to create exactly one git commit.\n"
             "Operate in the current repository and commit only the real source changes related to this task.\n"
             "Do not commit files under the workflow directory.\n"
+            "If you cannot actually create the commit because of permissions, approvals, or repository restrictions, say that clearly and do not claim success.\n"
             "Review the current git status, stage only relevant project files, create one concise commit, and then output:\n"
             "1. Commit message\n"
             "2. Commit hash\n"
@@ -764,8 +810,30 @@ class WorkflowRunner:
         return "\n".join(f"- {path}" for path in self.code_dirs)
 
     def has_git_changes(self) -> bool:
-        result = self.run_command(["git", "status", "--porcelain", "--"] + self.relative_code_dir_args(), cwd=self.project_dir)
-        return bool(result.stdout.strip())
+        result = self.git_status_porcelain(*self.relative_code_dir_args())
+        return result.returncode == 0 and bool(result.stdout.strip())
+
+    def build_commit_failure_report(
+        self,
+        commit_text: str,
+        result: CommandResult,
+        head_before: str,
+        head_after: str,
+    ) -> str:
+        remaining_status = self.git_status_porcelain(*self.relative_code_dir_args()).stdout.strip()
+        return (
+            "# Commit Stage Failed\n\n"
+            "Codex returned from the commit stage, but no real git commit was created.\n\n"
+            f"- Return code: {result.returncode}\n"
+            f"- HEAD before: {head_before or '(none)'}\n"
+            f"- HEAD after: {head_after or '(none)'}\n\n"
+            "## Codex output\n\n"
+            f"{commit_text.strip() or '(empty)'}\n\n"
+            "## STDERR\n\n"
+            f"{result.stderr.strip() or '(empty)'}\n\n"
+            "## Remaining git status in allowed code directories\n\n"
+            f"{remaining_status or '(clean or unavailable)'}\n"
+        )
 
     def load_claude_md(self) -> str:
         for code_dir in self.code_dirs:

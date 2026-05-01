@@ -27,10 +27,11 @@ This makes the implementation loop predictable, resumable, and suitable for repe
 - Fully automated dual-agent loop: `Codex -> Claude -> Codex`
 - The original user task is sent only to `Codex`
 - `Claude` does not directly read the raw task description
-- `Claude` works from:
+- `Claude` works only from:
   - the `Codex` plan
   - the `Codex` review feedback
   - the selected project files
+- Selecting a project automatically loads the current active workflow, if that project already has one
 
 ## Features
 
@@ -41,6 +42,7 @@ This makes the implementation loop predictable, resumable, and suitable for repe
 - Claude model selection
 - Claude permission mode selection
 - Optional auto-commit on success
+- Real commit-success verification
 - Task labels and task IDs
 - Current task state inside `workflow/`
 - Historical task archive inside `workflow_history/`
@@ -48,6 +50,46 @@ This makes the implementation loop predictable, resumable, and suitable for repe
 - Retry-after-rejection flow for repeated revise/re-review rounds
 - Pause and resume support
 - Workflow artifacts stored inside the target project
+
+## Button Logic
+
+When you choose a project directory, the launcher may automatically restore the current active task from that project's `workflow/` directory. That is expected behavior.
+
+The main task buttons are intentionally separated:
+
+- `Start` / `开始运行`: starts a brand-new workflow only when there is no active `workflow/`
+- `Continue Last Task` / `继续上次任务`: continues the current active workflow
+- `Retry Review Loop` / `再修再审`: used only after a rejected final review
+- `New Task Draft` / `新任务草稿`: archives the current `workflow/`, clears the task label and task description, and **does not auto-run**
+
+If you want to start a new task in a project that already contains an active workflow, the correct flow is:
+
+1. Select the project
+2. Click `New Task Draft` / `新任务草稿`
+3. Enter the new task label and new task description
+4. Click `Start` / `开始运行`
+
+## Auto-Commit Behavior
+
+If `auto-commit on success` is enabled:
+
+- the commit stage runs only after final review is approved
+- the commit stage is executed non-interactively, so it should not stop to ask for approval
+- the elevated execution behavior is limited to the `Codex commit` phase only
+- the workflow does **not** treat the existence of `06_codex_commit.md` as success by itself
+- the workflow verifies that a real git commit was created by checking repository state
+
+This means:
+
+- approval popups should not block the commit phase anymore
+- if git still fails because of repository policy or local git configuration, the stage will fail honestly and record the reason in `06_codex_commit.md`
+
+Examples of non-approval failures:
+
+- `git` user identity not configured
+- repository is not a valid git repository
+- commit signing / GPG policy blocks the commit
+- repository hooks or local policy reject the commit
 
 ## Do I Need Only The EXE?
 
@@ -80,6 +122,11 @@ In short:
 5. Add one or more allowed code directories
 6. Enter a task label and task description
 7. Click `Start`
+
+If the selected project already contains an active workflow:
+
+- continue it with `Continue Last Task`
+- or prepare a different task with `New Task Draft`, then edit the form, then click `Start`
 
 ### Option B: Run from Source
 
