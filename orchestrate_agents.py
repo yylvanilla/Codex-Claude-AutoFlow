@@ -23,6 +23,7 @@ PLAN_FILE = "01_codex_plan.md"
 IMPLEMENTATION_FILE = "02_claude_implementation.md"
 IMPLEMENTATION_DIFF_FILE = "02_workspace_after_claude.diff"
 REVIEW_FILE = "03_codex_review.md"
+RETRY_GUIDANCE_FILE = "03_retry_codex_guidance.md"
 REVISION_FILE = "04_claude_revision.md"
 REVISION_DIFF_FILE = "04_workspace_after_revision.diff"
 FINAL_REVIEW_FILE = "05_codex_final_review.md"
@@ -279,13 +280,21 @@ class WorkflowRunner:
         self.manifest["retry_round"] = retry_round
         self.manifest["active_retry_round"] = retry_round
         self.save_manifest()
-        self.set_stage("final_review", "pending_retry", retry_round=retry_round, pending_after="revise")
+        self.set_stage("final_review", "pending_retry", retry_round=retry_round, pending_after="review")
 
+        retry_guidance_text = self.run_retry_codex_guidance_stage(
+            plan_text,
+            implementation_text,
+            latest_revision_text,
+            rejected_final_review,
+            retry_round,
+        )
         revision_text = self.run_retry_revision_stage(
             plan_text,
             implementation_text,
             latest_revision_text,
             rejected_final_review,
+            retry_guidance_text,
             retry_round,
         )
         final_review_text = self.run_retry_final_review_stage(
@@ -560,7 +569,7 @@ class WorkflowRunner:
         self.set_stage("final_review", "completed", returncode=result.returncode)
         return review_text
 
-    def run_retry_revision_stage(
+    def run_retry_codex_guidance_stage(
         self,
         plan_text: str,
         implementation_text: str,
@@ -568,7 +577,43 @@ class WorkflowRunner:
         rejected_final_review: str,
         retry_round: int,
     ) -> str:
-        prompt = self.build_retry_revise_prompt(plan_text, implementation_text, latest_revision_text, rejected_final_review, retry_round)
+        prompt = self.build_retry_guidance_prompt(
+            plan_text,
+            implementation_text,
+            latest_revision_text,
+            rejected_final_review,
+            retry_round,
+        )
+        self.write_artifact(self.retry_history_file(retry_round, "prompts/retry_guidance_prompt.txt"), prompt)
+        output_path = self.artifact_path(RETRY_GUIDANCE_FILE)
+        self.set_stage("retry_guidance", "running", artifact=str(output_path), retry_round=retry_round)
+        result = self.run_command(self.build_codex_review_args(output_path), cwd=self.project_dir, stdin_text=prompt)
+        guidance_text = read_text_if_exists(output_path) or result.stdout
+        if result.returncode != 0 or not guidance_text.strip():
+            self.set_stage("retry_guidance", "failed", returncode=result.returncode, retry_round=retry_round)
+            raise WorkflowError("Codex retry guidance stage failed")
+        self.write_artifact(RETRY_GUIDANCE_FILE, guidance_text)
+        self.write_artifact(self.retry_history_file(retry_round, RETRY_GUIDANCE_FILE), guidance_text)
+        self.set_stage("retry_guidance", "completed", returncode=result.returncode, retry_round=retry_round)
+        return guidance_text
+
+    def run_retry_revision_stage(
+        self,
+        plan_text: str,
+        implementation_text: str,
+        latest_revision_text: str,
+        rejected_final_review: str,
+        retry_guidance_text: str,
+        retry_round: int,
+    ) -> str:
+        prompt = self.build_retry_revise_prompt(
+            plan_text,
+            implementation_text,
+            latest_revision_text,
+            rejected_final_review,
+            retry_guidance_text,
+            retry_round,
+        )
         self.write_artifact(self.retry_history_file(retry_round, "prompts/retry_revise_prompt.txt"), prompt)
         self.write_artifact(self.retry_history_file(retry_round, "input_rejected_final_review.md"), rejected_final_review)
         artifact = self.artifact_path(REVISION_FILE)
@@ -740,7 +785,7 @@ class WorkflowRunner:
             f"Revision summary:\n{revision_text}\n"
         )
 
-    def build_retry_revise_prompt(
+    def build_retry_guidance_prompt(
         self,
         plan_text: str,
         implementation_text: str,
@@ -749,9 +794,38 @@ class WorkflowRunner:
         retry_round: int,
     ) -> str:
         return (
+            "You are Codex. The previous final review was REJECTED and the user requested another retry cycle.\n"
+            "Before Claude edits code again, produce a fresh retry guidance that combines the current task description and the rejected final review.\n"
+            "Inspect the current workspace code and provide a concrete Markdown instruction set with at least:\n"
+            "1. Retry objective (what changed or was clarified in the task)\n"
+            "2. Rejected issues mapped to required fixes\n"
+            "3. File-level change guidance\n"
+            "4. Scope boundaries and things Claude must not change\n"
+            "5. Validation checklist Claude should run before handing back\n"
+            "6. A final section titled 'Instruction for Claude' with direct actionable bullets\n\n"
+            f"Retry round: {retry_round}\n\n"
+            f"Task:\n{self.args.task}\n\n"
+            f"Allowed code directories:\n{self.render_code_dir_list()}\n\n"
+            f"Original plan:\n{plan_text}\n\n"
+            f"First implementation summary:\n{implementation_text}\n\n"
+            f"Latest revision summary:\n{latest_revision_text}\n\n"
+            f"Rejected final review from Codex:\n{rejected_final_review}\n"
+        )
+
+    def build_retry_revise_prompt(
+        self,
+        plan_text: str,
+        implementation_text: str,
+        latest_revision_text: str,
+        rejected_final_review: str,
+        retry_guidance_text: str,
+        retry_round: int,
+    ) -> str:
+        return (
             "You are Claude. Codex already performed a final review and rejected the current workspace.\n"
             "This is a user-approved retry cycle. Directly modify the project files to address the rejected final review.\n"
-            "You must rely only on the Codex plan, the latest workspace state you can inspect, and the rejected final review below.\n"
+            "You must rely on the Codex retry guidance below as the latest instruction baseline.\n"
+            "Use the Codex plan and rejected final review as supporting context only.\n"
             "Do not assume access to any separate original user request beyond the Codex plan.\n"
             "Do not stop at a proposal or patch-only answer. Make the code changes now.\n"
             "Keep edits within the allowed code directory list and keep the scope limited to the task.\n"
@@ -759,6 +833,7 @@ class WorkflowRunner:
             f"{self.render_code_dir_list()}\n\n"
             "After finishing, output a concise Markdown summary of what you corrected, which files changed, and any validation you performed.\n\n"
             f"Retry round: {retry_round}\n\n"
+            f"Codex retry guidance:\n{retry_guidance_text}\n\n"
             f"Codex plan:\n{plan_text}\n\n"
             f"First implementation summary:\n{implementation_text}\n\n"
             f"Latest revision summary:\n{latest_revision_text}\n\n"

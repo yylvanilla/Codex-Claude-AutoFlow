@@ -46,6 +46,7 @@ PERMISSION_MODE_HELP = {
 ARTIFACT_BUTTONS = [
     ("计划", "01_codex_plan.md"),
     ("初审", "03_codex_review.md"),
+    ("再修指导", "03_retry_codex_guidance.md"),
     ("终审", "05_codex_final_review.md"),
     ("提交记录", "06_codex_commit.md"),
     ("日志", "run.log"),
@@ -55,6 +56,7 @@ STAGE_LABELS = {
     "plan": "Codex 规划",
     "implement": "Claude 修改",
     "review": "Codex 初审",
+    "retry_guidance": "Codex 再修指导",
     "revise": "Claude 修订",
     "final_review": "Codex 终审",
     "commit": "Codex 提交",
@@ -127,6 +129,7 @@ class WorkflowLauncher:
         self.monitor_job: str | None = None
         self.hidden_startupinfo = build_hidden_startupinfo()
         self.history_items: list[dict] = []
+        self.retry_instruction_note = ""
 
         self._build_ui()
         self.set_code_dirs(settings.get("code_dirs", DEFAULT_CODE_DIRS))
@@ -721,12 +724,11 @@ class WorkflowLauncher:
             lines.append(f"{label}: {self.format_stage_status(key, stage, manifest)}")
         self.stage_var.set("\n".join(lines))
 
-    def set_pending_stage_status(self, action_label: str) -> None:
+    def set_pending_stage_status(self, action_label: str, *, pending_stage_key: str = "plan") -> None:
         lines = [f"工作流状态: {action_label}"]
-        first = True
-        for _key, label in STAGE_LABELS.items():
-            lines.append(f"{label}: {'等待启动' if first else '未开始'}")
-            first = False
+        for key, label in STAGE_LABELS.items():
+            status = "等待启动" if key == pending_stage_key else "未开始"
+            lines.append(f"{label}: {status}")
         self.stage_var.set("\n".join(lines))
 
     def update_artifact_buttons(self) -> None:
@@ -761,16 +763,52 @@ class WorkflowLauncher:
     def current_task_label_text(self) -> str:
         return self.task_label_var.get().strip()
 
+    @staticmethod
+    def normalize_task_text(text: str) -> str:
+        stripped = text.strip()
+        if not stripped:
+            return ""
+        return "\n".join(line.rstrip() for line in stripped.splitlines()).strip()
+
+    def merge_retry_task_with_user_update(self, saved_task: str, current_task: str) -> tuple[str, str]:
+        base_task = saved_task.strip() or current_task.strip()
+        if not base_task:
+            return "", ""
+
+        saved_normalized = self.normalize_task_text(saved_task)
+        current_normalized = self.normalize_task_text(current_task)
+        if not current_normalized or current_normalized == saved_normalized:
+            return base_task, ""
+
+        extra_instruction = current_task.strip()
+        saved_text = saved_task.strip()
+        if saved_text and extra_instruction.startswith(saved_text):
+            appended = extra_instruction[len(saved_text) :].strip()
+            if appended:
+                extra_instruction = appended
+
+        merged_task = (
+            f"{base_task}\n\n"
+            "[Retry Additional User Instruction]\n"
+            f"{extra_instruction}\n"
+        ).strip()
+        return merged_task, extra_instruction
+
     def build_command(self, *, resume: bool = False, retry_final_reject: bool = False) -> list[str] | None:
         project_dir = Path(self.project_var.get().strip())
         code_dirs = self.get_code_dirs()
         if (resume or retry_final_reject) and not code_dirs:
             code_dirs = [self.normalize_code_dir_display(code_dir) for code_dir in self.saved_code_dirs_from_workflow()]
 
+        self.retry_instruction_note = ""
         task = self.current_task_text()
         saved_task = self.saved_task_from_workflow()
-        if (resume or retry_final_reject) and saved_task:
+        if resume and saved_task:
             task = saved_task
+        if retry_final_reject:
+            task, retry_extra_instruction = self.merge_retry_task_with_user_update(saved_task, task)
+            if retry_extra_instruction:
+                self.retry_instruction_note = retry_extra_instruction
         task_label = self.current_task_label_text()
         saved_task_label = self.saved_task_label_from_workflow()
         if (resume or retry_final_reject) and saved_task_label:
@@ -828,7 +866,7 @@ class WorkflowLauncher:
             cmd = [sys.executable, str(ORCHESTRATOR), *orchestrator_args]
         return cmd
 
-    def start_process(self, cmd: list[str], action_label: str) -> None:
+    def start_process(self, cmd: list[str], action_label: str, *, pending_stage_key: str = "plan") -> None:
         if self.process is not None:
             messagebox.showinfo("提示", "当前已有任务在运行，请等待结束。")
             return
@@ -841,7 +879,7 @@ class WorkflowLauncher:
         self.process_active = True
         self.update_history_action_buttons()
         self.status_var.set(f"{action_label}...")
-        self.set_pending_stage_status(action_label)
+        self.set_pending_stage_status(action_label, pending_stage_key=pending_stage_key)
         self.append_log(f"\n=== {action_label} ===\n")
         self.append_log("命令: " + subprocess.list2cmdline(cmd) + "\n\n")
 
@@ -874,7 +912,9 @@ class WorkflowLauncher:
     def retry_after_reject_workflow(self) -> None:
         cmd = self.build_command(resume=False, retry_final_reject=True)
         if cmd is not None:
-            self.start_process(cmd, "再修再审")
+            if self.retry_instruction_note:
+                self.append_log("检测到你在“再修再审”前更新了任务描述，已作为追加指令并入当前任务后发送给 Codex。\n")
+            self.start_process(cmd, "再修再审", pending_stage_key="retry_guidance")
 
     def restart_workflow(self) -> None:
         workflow_dir = self.workflow_dir()
