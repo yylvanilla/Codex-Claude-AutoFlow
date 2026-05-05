@@ -394,13 +394,13 @@ class WorkflowRunner:
     def build_codex_commit_args(self, output_path: Path) -> list[str]:
         args = [
             str(self.codex_cmd),
+            "-a",
+            "never",
             "exec",
             "--cd",
             str(self.project_dir),
             "--output-last-message",
             str(output_path),
-            "--ask-for-approval",
-            "never",
             "--sandbox",
             "danger-full-access",
         ]
