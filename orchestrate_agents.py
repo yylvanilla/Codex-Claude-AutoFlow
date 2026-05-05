@@ -16,7 +16,7 @@ from typing import Any
 
 
 CODEX_CMD = "codex.cmd"
-CLAUDE_CMD = "claude.cmd"
+CLAUDE_CMD = "claude-work.cmd"
 
 TASK_FILE = "00_task.txt"
 PLAN_FILE = "01_codex_plan.md"
