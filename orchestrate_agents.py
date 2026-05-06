@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -821,7 +822,7 @@ class WorkflowRunner:
             return {
                 "status": "skipped",
                 "reason": "no_changes",
-                "report": "No repository changes were detected under the allowed code directories, so real git commit was skipped.",
+                "report": "允许代码目录下未检测到代码改动，因此跳过真实 git 提交。",
             }
 
         head_before = self.git_head_commit()
@@ -834,6 +835,23 @@ class WorkflowRunner:
         remaining_status = self.git_status_porcelain(*self.relative_code_dir_args()).stdout.strip()
 
         if head_after and head_after != head_before:
+            commit_message = self.run_command(["git", "log", "-1", "--pretty=%s%n%b"], cwd=self.project_dir).stdout.strip()
+            if not self.contains_cjk(commit_message):
+                return {
+                    "status": "failed",
+                    "reason": "non_chinese_commit_message",
+                    "returncode": result.returncode or 1,
+                    "head_before": head_before,
+                    "head_after": head_after,
+                    "report": (
+                        "已创建真实提交，但提交标题/正文未检测到中文，不符合当前工作流规范。\n\n"
+                        f"提交哈希：{head_after}\n\n"
+                        "当前提交信息：\n"
+                        f"{commit_message or '(empty)'}\n\n"
+                        "建议手动修正：\n"
+                        "git commit --amend\n"
+                    ),
+                }
             if remaining_status:
                 return {
                     "status": "failed",
@@ -842,13 +860,11 @@ class WorkflowRunner:
                     "head_before": head_before,
                     "head_after": head_after,
                     "report": (
-                        "A git commit was created, but there are still uncommitted changes "
-                        "under the allowed code directories. Commit stage requires all allowed "
-                        "changes to be included in the single commit.\n\n"
-                        f"Commit hash: {head_after}\n\n"
-                        "Remaining git status in allowed code directories:\n"
+                        "已创建真实提交，但允许代码目录下仍有未提交改动。当前规则要求一次提交覆盖允许目录下全部改动。\n\n"
+                        f"提交哈希：{head_after}\n\n"
+                        "允许代码目录下剩余 git 状态：\n"
                         f"{remaining_status}\n\n"
-                        "Codex output:\n"
+                        "Codex 输出：\n"
                         f"{(commit_text or '').strip() or '(empty)'}\n"
                     ),
                 }
@@ -858,7 +874,7 @@ class WorkflowRunner:
                 "head_before": head_before,
                 "head_after": head_after,
                 "commit_hash": head_after,
-                "report": (commit_text or "").strip() or f"Git commit created successfully.\n\nCommit hash: {head_after}",
+                "report": (commit_text or "").strip() or f"真实 git 提交已成功创建。\n\n提交哈希：{head_after}",
             }
 
         failure_report = self.build_commit_failure_report(commit_text, result, head_before, head_after)
@@ -877,23 +893,23 @@ class WorkflowRunner:
         status = str(git_commit_result.get("status", "") or "")
         if status == "completed":
             suffix = (
-                "## Optional Real Git Commit Result\n\n"
-                "Status: COMPLETED\n\n"
-                f"Commit hash: {git_commit_result.get('commit_hash', '(unknown)')}\n\n"
+                "## 可选真实 Git 提交结果\n\n"
+                "状态：完成\n\n"
+                f"提交哈希：{git_commit_result.get('commit_hash', '(unknown)')}\n\n"
                 f"{str(git_commit_result.get('report', '') or '').strip()}\n"
             )
             return f"{summary}\n\n{suffix}"
         if status == "skipped":
             suffix = (
-                "## Optional Real Git Commit Result\n\n"
-                "Status: SKIPPED\n\n"
-                f"Reason: {git_commit_result.get('reason', 'no_changes')}\n\n"
+                "## 可选真实 Git 提交结果\n\n"
+                "状态：跳过\n\n"
+                f"原因：{git_commit_result.get('reason', 'no_changes')}\n\n"
                 f"{str(git_commit_result.get('report', '') or '').strip()}\n"
             )
             return f"{summary}\n\n{suffix}"
         suffix = (
-            "## Optional Real Git Commit Result\n\n"
-            "Status: FAILED\n\n"
+            "## 可选真实 Git 提交结果\n\n"
+            "状态：失败\n\n"
             f"{str(git_commit_result.get('report', '') or '').strip()}\n"
         )
         return f"{summary}\n\n{suffix}"
@@ -1060,44 +1076,45 @@ class WorkflowRunner:
 
     def build_commit_prompt(self, plan_text: str, final_review_text: str) -> str:
         return (
-            "You are Codex. The coding task has passed final review.\n"
-            "This stage ALWAYS generates workflow/06_codex_commit.md.\n"
-            "Do NOT execute git add / git commit / git push in this stage.\n"
-            "Inspect the current workspace and git status, then output ONE Markdown report with the following sections:\n"
-            "1. Workflow summary (goal, key implementation points, final review verdict)\n"
-            "2. Changed files and what changed in each file\n"
-            "3. Validation summary (what was verified and remaining risks)\n"
-            "4. Suggested commit title\n"
-            "5. Suggested commit message body\n"
-            "6. Suggested git commands (for the user to run manually)\n\n"
-            f"Task:\n{self.args.task}\n\n"
-            f"Allowed code directories:\n{self.render_code_dir_list()}\n\n"
-            "Context references:\n"
-            "- Use workflow/01_codex_plan.md as needed\n"
-            "- Use workflow/05_codex_final_review.md as needed\n"
-            "- Use the current git diff/status as the source of truth\n"
+            "你是 Codex。当前编码任务已通过最终审查。\n"
+            "本阶段必须生成 workflow/06_codex_commit.md。\n"
+            "本阶段严禁执行 git add / git commit / git push。\n"
+            "请检查当前工作区与 git 状态，输出一份 Markdown 报告，且全文必须为简体中文，至少包含：\n"
+            "1. 工作流总结（目标、关键实现点、终审结论）\n"
+            "2. 改动文件清单及每个文件改动说明\n"
+            "3. 验证总结（已验证内容与剩余风险）\n"
+            "4. 建议的提交标题（简体中文）\n"
+            "5. 建议的提交正文（简体中文）\n"
+            "6. 建议执行的 git 命令（供用户手动执行）\n\n"
+            f"任务描述：\n{self.args.task}\n\n"
+            f"允许代码目录：\n{self.render_code_dir_list()}\n\n"
+            "上下文参考：\n"
+            "- 可按需引用 workflow/01_codex_plan.md\n"
+            "- 可按需引用 workflow/05_codex_final_review.md\n"
+            "- 以当前 git diff/status 为最终事实来源\n"
         )
 
     def build_git_commit_prompt(self, plan_text: str, final_review_text: str, summary_text: str) -> str:
         return (
-            "You are Codex. Now perform the optional REAL git commit step.\n"
-            "Operate in the current repository.\n"
-            "Create exactly ONE git commit that includes ALL current changes under the allowed code directories.\n"
-            "Do NOT leave any staged/unstaged/untracked changes under the allowed code directories after commit.\n"
-            "Do NOT commit workflow artifacts (workflow/*) or files outside the allowed code directories.\n"
-            "If repository policy/permissions prevent commit, report failure honestly and do not claim success.\n"
-            "After attempting commit, output:\n"
-            "1. Commit status (COMPLETED/SKIPPED/FAILED)\n"
-            "2. Commit message title\n"
-            "3. Commit message body\n"
-            "4. Commit hash (if completed)\n"
-            "5. Staged/committed files summary\n"
-            "6. Failure reason and next manual command suggestions (if failed)\n\n"
-            f"Task:\n{self.args.task}\n\n"
-            f"Allowed code directories:\n{self.render_code_dir_list()}\n\n"
-            f"Codex plan:\n{plan_text}\n\n"
-            f"Final review:\n{final_review_text}\n\n"
-            f"06 summary draft:\n{summary_text}\n"
+            "你是 Codex。现在执行可选的真实 git 提交步骤。\n"
+            "在当前仓库中操作。\n"
+            "必须创建且仅创建 1 个提交，并包含允许代码目录下当前全部改动。\n"
+            "提交后，允许代码目录下不得残留 staged/unstaged/untracked 改动。\n"
+            "禁止提交 workflow/* 产物以及允许代码目录外的文件。\n"
+            "提交标题与提交正文必须使用简体中文，不得使用英文提交信息。\n"
+            "若仓库策略或权限导致无法提交，必须如实报告失败，不得宣称成功。\n"
+            "执行后请输出（全文简体中文）：\n"
+            "1. 提交状态（COMPLETED/SKIPPED/FAILED）\n"
+            "2. 提交标题（简体中文）\n"
+            "3. 提交正文（简体中文）\n"
+            "4. 提交哈希（若成功）\n"
+            "5. 已暂存/已提交文件摘要\n"
+            "6. 失败原因与下一步手动命令建议（若失败）\n\n"
+            f"任务描述：\n{self.args.task}\n\n"
+            f"允许代码目录：\n{self.render_code_dir_list()}\n\n"
+            f"Codex 计划：\n{plan_text}\n\n"
+            f"最终审查：\n{final_review_text}\n\n"
+            f"06 汇总草稿：\n{summary_text}\n"
         )
 
     def render_code_dir_list(self) -> str:
@@ -1116,16 +1133,16 @@ class WorkflowRunner:
     ) -> str:
         remaining_status = self.git_status_porcelain(*self.relative_code_dir_args()).stdout.strip()
         return (
-            "# Commit Stage Failed\n\n"
-            "Codex returned from the commit stage, but no real git commit was created.\n\n"
-            f"- Return code: {result.returncode}\n"
-            f"- HEAD before: {head_before or '(none)'}\n"
-            f"- HEAD after: {head_after or '(none)'}\n\n"
-            "## Codex output\n\n"
+            "# Commit 阶段失败\n\n"
+            "Codex 已返回，但未创建真实 git 提交。\n\n"
+            f"- 返回码：{result.returncode}\n"
+            f"- 提交前 HEAD：{head_before or '(none)'}\n"
+            f"- 提交后 HEAD：{head_after or '(none)'}\n\n"
+            "## Codex 输出\n\n"
             f"{commit_text.strip() or '(empty)'}\n\n"
             "## STDERR\n\n"
             f"{result.stderr.strip() or '(empty)'}\n\n"
-            "## Remaining git status in allowed code directories\n\n"
+            "## 允许代码目录下剩余 git 状态\n\n"
             f"{remaining_status or '(clean or unavailable)'}\n"
         )
 
@@ -1204,6 +1221,10 @@ class WorkflowRunner:
                 return token
             return ""
         return ""
+
+    @staticmethod
+    def contains_cjk(text: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
 
     @staticmethod
     def resolve_command(raw: str) -> str:
