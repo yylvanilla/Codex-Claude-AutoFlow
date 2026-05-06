@@ -38,6 +38,7 @@ PROMPT_FILES = {
     "revise": "prompts/revise_prompt.txt",
     "final_review": "prompts/final_review_prompt.txt",
     "commit": "prompts/commit_prompt.txt",
+    "git_commit": "prompts/git_commit_prompt.txt",
 }
 
 
@@ -259,8 +260,7 @@ class WorkflowRunner:
             self.mark_waiting_for_retry("initial_final_review")
             return "needs_user_decision"
 
-        if self.args.commit_on_success:
-            self.run_commit_stage(plan_text, final_review_text)
+        self.run_commit_stage(plan_text, final_review_text, perform_git_commit=self.args.commit_on_success)
 
         self.finalize_completed_workflow()
         return "completed"
@@ -309,8 +309,7 @@ class WorkflowRunner:
             self.mark_waiting_for_retry(f"retry_final_review_{retry_round:02d}")
             return "needs_user_decision"
 
-        if self.args.commit_on_success:
-            self.run_commit_stage(plan_text, final_review_text)
+        self.run_commit_stage(plan_text, final_review_text, perform_git_commit=self.args.commit_on_success)
 
         self.finalize_completed_workflow()
         return "completed"
@@ -405,24 +404,38 @@ class WorkflowRunner:
             raise WorkflowError(f"Claude {stage_label} stage failed")
         return output
 
+    def stage_reasoning_effort(self, stage: str) -> str:
+        stage_map = {
+            "plan": str(getattr(self.args, "codex_plan_reasoning_effort", "") or "").strip(),
+            "review": str(getattr(self.args, "codex_review_reasoning_effort", "") or "").strip(),
+            "final_review": str(getattr(self.args, "codex_final_review_reasoning_effort", "") or "").strip(),
+            "wrapup": str(getattr(self.args, "codex_wrapup_reasoning_effort", "") or "").strip(),
+        }
+        stage_value = stage_map.get(stage, "")
+        if stage_value:
+            return stage_value
+        return str(getattr(self.args, "codex_reasoning_effort", "") or "").strip()
+
     def build_codex_exec_args(self, output_path: Path) -> list[str]:
         args = [str(self.codex_cmd), "exec", "--cd", str(self.primary_code_dir), "--output-last-message", str(output_path)]
         if self.args.codex_model:
             args.extend(["--model", self.args.codex_model])
-        if self.args.codex_reasoning_effort:
-            args.extend(["--config", f'model_reasoning_effort="{self.args.codex_reasoning_effort}"'])
+        effort = self.stage_reasoning_effort("plan")
+        if effort:
+            args.extend(["--config", f'model_reasoning_effort="{effort}"'])
         for code_dir in self.code_dirs[1:]:
             args.extend(["--add-dir", str(code_dir)])
         if self.args.codex_extra_args:
             args.extend(self.split_extra_args(self.args.codex_extra_args))
         return args
 
-    def build_codex_review_args(self, output_path: Path) -> list[str]:
+    def build_codex_review_args(self, output_path: Path, *, final_review: bool = False) -> list[str]:
         args = [str(self.codex_cmd), "exec", "--cd", str(self.primary_code_dir), "--output-last-message", str(output_path)]
         if self.args.codex_model:
             args.extend(["--model", self.args.codex_model])
-        if self.args.codex_reasoning_effort:
-            args.extend(["--config", f'model_reasoning_effort="{self.args.codex_reasoning_effort}"'])
+        effort = self.stage_reasoning_effort("final_review" if final_review else "review")
+        if effort:
+            args.extend(["--config", f'model_reasoning_effort="{effort}"'])
         for code_dir in self.code_dirs[1:]:
             args.extend(["--add-dir", str(code_dir)])
         extra = self.args.codex_review_extra_args or self.args.codex_extra_args
@@ -431,6 +444,27 @@ class WorkflowRunner:
         return args
 
     def build_codex_commit_args(self, output_path: Path) -> list[str]:
+        args = [
+            str(self.codex_cmd),
+            "exec",
+            "--cd",
+            str(self.project_dir),
+            "--output-last-message",
+            str(output_path),
+        ]
+        if self.args.codex_model:
+            args.extend(["--model", self.args.codex_model])
+        effort = self.stage_reasoning_effort("wrapup")
+        if effort:
+            args.extend(["--config", f'model_reasoning_effort="{effort}"'])
+        for code_dir in self.code_dirs:
+            args.extend(["--add-dir", str(code_dir)])
+        extra = self.args.codex_review_extra_args or self.args.codex_extra_args
+        if extra:
+            args.extend(self.split_extra_args(extra))
+        return args
+
+    def build_codex_git_commit_args(self, output_path: Path) -> list[str]:
         args = [
             str(self.codex_cmd),
             "-a",
@@ -445,8 +479,11 @@ class WorkflowRunner:
         ]
         if self.args.codex_model:
             args.extend(["--model", self.args.codex_model])
-        if self.args.codex_reasoning_effort:
-            args.extend(["--config", f'model_reasoning_effort="{self.args.codex_reasoning_effort}"'])
+        effort = self.stage_reasoning_effort("wrapup")
+        if effort:
+            args.extend(["--config", f'model_reasoning_effort="{effort}"'])
+        for code_dir in self.code_dirs:
+            args.extend(["--add-dir", str(code_dir)])
         extra = self.args.codex_review_extra_args or self.args.codex_extra_args
         if extra:
             args.extend(self.split_extra_args(extra))
@@ -554,7 +591,11 @@ class WorkflowRunner:
         self.write_artifact(PROMPT_FILES["review"], prompt)
         output_path = self.artifact_path(REVIEW_FILE)
         self.set_stage("review", "running", artifact=str(output_path))
-        result = self.run_command(self.build_codex_review_args(output_path), cwd=self.project_dir, stdin_text=prompt)
+        result = self.run_command(
+            self.build_codex_review_args(output_path, final_review=False),
+            cwd=self.project_dir,
+            stdin_text=prompt,
+        )
         review_text = read_text_if_exists(output_path) or result.stdout
         if result.returncode != 0 or not review_text.strip():
             self.set_stage("review", "failed", returncode=result.returncode)
@@ -591,7 +632,11 @@ class WorkflowRunner:
         self.write_artifact(PROMPT_FILES["final_review"], prompt)
         output_path = self.artifact_path(FINAL_REVIEW_FILE)
         self.set_stage("final_review", "running", artifact=str(output_path))
-        result = self.run_command(self.build_codex_review_args(output_path), cwd=self.project_dir, stdin_text=prompt)
+        result = self.run_command(
+            self.build_codex_review_args(output_path, final_review=True),
+            cwd=self.project_dir,
+            stdin_text=prompt,
+        )
         review_text = read_text_if_exists(output_path) or result.stdout
         if result.returncode != 0 or not review_text.strip():
             self.set_stage("final_review", "failed", returncode=result.returncode)
@@ -687,7 +732,11 @@ class WorkflowRunner:
         self.write_artifact(self.retry_history_file(retry_round, "prompts/retry_final_review_prompt.txt"), prompt)
         output_path = self.artifact_path(FINAL_REVIEW_FILE)
         self.set_stage("final_review", "running", artifact=str(output_path), retry_round=retry_round)
-        result = self.run_command(self.build_codex_review_args(output_path), cwd=self.project_dir, stdin_text=prompt)
+        result = self.run_command(
+            self.build_codex_review_args(output_path, final_review=True),
+            cwd=self.project_dir,
+            stdin_text=prompt,
+        )
         review_text = read_text_if_exists(output_path) or result.stdout
         if result.returncode != 0 or not review_text.strip():
             self.set_stage("final_review", "failed", returncode=result.returncode, retry_round=retry_round)
@@ -697,54 +746,138 @@ class WorkflowRunner:
         self.set_stage("final_review", "completed", returncode=result.returncode, retry_round=retry_round)
         return review_text
 
-    def run_commit_stage(self, plan_text: str, final_review_text: str) -> str:
+    def run_commit_stage(self, plan_text: str, final_review_text: str, *, perform_git_commit: bool) -> str:
         if self.should_skip("commit", COMMIT_FILE):
             return read_text_if_exists(self.artifact_path(COMMIT_FILE))
-
-        self.ensure_git_repository_for_commit()
-
-        if not self.has_git_changes():
-            message = "No repository changes were detected, so the commit stage was skipped."
-            self.write_artifact(COMMIT_FILE, message)
-            self.set_stage("commit", "skipped", reason="no changes")
-            return message
-
-        head_before = self.git_head_commit()
         prompt = self.build_commit_prompt(plan_text, final_review_text)
         self.write_artifact(PROMPT_FILES["commit"], prompt)
         output_path = self.artifact_path(COMMIT_FILE)
-        self.set_stage("commit", "running", artifact=str(output_path))
+        self.set_stage("commit", "running", artifact=str(output_path), commit_requested=perform_git_commit)
         result = self.run_command(self.build_codex_commit_args(output_path), cwd=self.project_dir, stdin_text=prompt)
-        commit_text = read_text_if_exists(output_path) or result.stdout
-        head_after = self.git_head_commit()
+        summary_text = read_text_if_exists(output_path) or result.stdout
+        if result.returncode != 0 or not summary_text.strip():
+            self.set_stage("commit", "failed", returncode=result.returncode)
+            raise WorkflowError("Codex wrap-up stage failed to produce the workflow summary artifact.")
 
-        if head_after and head_after != head_before:
-            if not commit_text.strip():
-                commit_text = (
-                    "Codex created a git commit, but did not return a commit summary.\n\n"
-                    f"Commit hash: {head_after}\n"
-                )
-            self.write_artifact(COMMIT_FILE, commit_text)
+        final_text = summary_text.rstrip() + "\n"
+        if not perform_git_commit:
+            self.write_artifact(COMMIT_FILE, final_text)
+            self.set_stage("commit", "completed", returncode=result.returncode, mode="summary_only", commit_requested=False)
+            return final_text
+
+        git_commit_result = self.try_optional_git_commit(plan_text, final_review_text, summary_text)
+        final_text = self.merge_summary_and_git_commit_result(summary_text, git_commit_result)
+        self.write_artifact(COMMIT_FILE, final_text)
+
+        if git_commit_result["status"] == "completed":
             self.set_stage(
                 "commit",
                 "completed",
                 returncode=result.returncode,
-                previous_head=head_before or None,
-                commit_hash=head_after,
+                mode="summary_plus_git_commit",
+                commit_requested=True,
+                git_commit_status="completed",
+                commit_hash=git_commit_result.get("commit_hash"),
             )
-            return commit_text
+            return final_text
 
-        failure_report = self.build_commit_failure_report(commit_text, result, head_before, head_after)
-        self.write_artifact(COMMIT_FILE, failure_report)
+        if git_commit_result["status"] == "skipped":
+            self.set_stage(
+                "commit",
+                "completed",
+                returncode=result.returncode,
+                mode="summary_plus_git_commit",
+                commit_requested=True,
+                git_commit_status="skipped",
+                reason=git_commit_result.get("reason", "no_changes"),
+            )
+            return final_text
+
         self.set_stage(
             "commit",
             "failed",
-            returncode=result.returncode,
-            reason="no_real_commit_created",
-            previous_head=head_before or None,
-            current_head=head_after or None,
+            returncode=int(git_commit_result.get("returncode", 1) or 1),
+            mode="summary_plus_git_commit",
+            commit_requested=True,
+            git_commit_status="failed",
+            reason=git_commit_result.get("reason", "git_commit_failed"),
+            previous_head=git_commit_result.get("head_before"),
+            current_head=git_commit_result.get("head_after"),
         )
-        raise WorkflowError("Codex commit stage did not create a real git commit. Approval may have been denied.")
+        raise WorkflowError("Codex generated 06 summary, but the optional real git commit step failed.")
+
+    def try_optional_git_commit(self, plan_text: str, final_review_text: str, summary_text: str) -> dict[str, Any]:
+        try:
+            self.ensure_git_repository_for_commit()
+        except WorkflowError as exc:
+            return {
+                "status": "failed",
+                "reason": "not_git_repository",
+                "returncode": 1,
+                "report": f"Commit stage requires a valid git repository.\n\n{exc}",
+            }
+
+        if not self.has_git_changes():
+            return {
+                "status": "skipped",
+                "reason": "no_changes",
+                "report": "No repository changes were detected under the allowed code directories, so real git commit was skipped.",
+            }
+
+        head_before = self.git_head_commit()
+        prompt = self.build_git_commit_prompt(plan_text, final_review_text, summary_text)
+        self.write_artifact(PROMPT_FILES["git_commit"], prompt)
+        output_path = self.artifact_path("06a_codex_git_commit.md")
+        result = self.run_command(self.build_codex_git_commit_args(output_path), cwd=self.project_dir, stdin_text=prompt)
+        commit_text = read_text_if_exists(output_path) or result.stdout
+        head_after = self.git_head_commit()
+
+        if head_after and head_after != head_before:
+            return {
+                "status": "completed",
+                "returncode": result.returncode,
+                "head_before": head_before,
+                "head_after": head_after,
+                "commit_hash": head_after,
+                "report": (commit_text or "").strip() or f"Git commit created successfully.\n\nCommit hash: {head_after}",
+            }
+
+        failure_report = self.build_commit_failure_report(commit_text, result, head_before, head_after)
+        return {
+            "status": "failed",
+            "reason": "no_real_commit_created",
+            "returncode": result.returncode,
+            "head_before": head_before,
+            "head_after": head_after,
+            "report": failure_report,
+        }
+
+    @staticmethod
+    def merge_summary_and_git_commit_result(summary_text: str, git_commit_result: dict[str, Any]) -> str:
+        summary = summary_text.rstrip()
+        status = str(git_commit_result.get("status", "") or "")
+        if status == "completed":
+            suffix = (
+                "## Optional Real Git Commit Result\n\n"
+                "Status: COMPLETED\n\n"
+                f"Commit hash: {git_commit_result.get('commit_hash', '(unknown)')}\n\n"
+                f"{str(git_commit_result.get('report', '') or '').strip()}\n"
+            )
+            return f"{summary}\n\n{suffix}"
+        if status == "skipped":
+            suffix = (
+                "## Optional Real Git Commit Result\n\n"
+                "Status: SKIPPED\n\n"
+                f"Reason: {git_commit_result.get('reason', 'no_changes')}\n\n"
+                f"{str(git_commit_result.get('report', '') or '').strip()}\n"
+            )
+            return f"{summary}\n\n{suffix}"
+        suffix = (
+            "## Optional Real Git Commit Result\n\n"
+            "Status: FAILED\n\n"
+            f"{str(git_commit_result.get('report', '') or '').strip()}\n"
+        )
+        return f"{summary}\n\n{suffix}"
 
     def build_plan_prompt(self) -> str:
         return (
@@ -899,18 +1032,43 @@ class WorkflowRunner:
 
     def build_commit_prompt(self, plan_text: str, final_review_text: str) -> str:
         return (
-            "You are Codex. The coding task has passed final review and now you need to create exactly one git commit.\n"
-            "Operate in the current repository and commit only the real source changes related to this task.\n"
-            "Do not commit files under the workflow directory.\n"
-            "If you cannot actually create the commit because of permissions, approvals, or repository restrictions, say that clearly and do not claim success.\n"
-            "Review the current git status, stage only relevant project files, create one concise commit, and then output:\n"
-            "1. Commit message\n"
-            "2. Commit hash\n"
-            "3. Short summary of committed files\n\n"
+            "You are Codex. The coding task has passed final review.\n"
+            "This stage ALWAYS generates workflow/06_codex_commit.md.\n"
+            "Do NOT execute git add / git commit / git push in this stage.\n"
+            "Inspect the current workspace and git status, then output ONE Markdown report with the following sections:\n"
+            "1. Workflow summary (goal, key implementation points, final review verdict)\n"
+            "2. Changed files and what changed in each file\n"
+            "3. Validation summary (what was verified and remaining risks)\n"
+            "4. Suggested commit title\n"
+            "5. Suggested commit message body\n"
+            "6. Suggested git commands (for the user to run manually)\n\n"
+            f"Task:\n{self.args.task}\n\n"
+            f"Allowed code directories:\n{self.render_code_dir_list()}\n\n"
+            "Context references:\n"
+            "- Use workflow/01_codex_plan.md as needed\n"
+            "- Use workflow/05_codex_final_review.md as needed\n"
+            "- Use the current git diff/status as the source of truth\n"
+        )
+
+    def build_git_commit_prompt(self, plan_text: str, final_review_text: str, summary_text: str) -> str:
+        return (
+            "You are Codex. Now perform the optional REAL git commit step.\n"
+            "Operate in the current repository.\n"
+            "Create exactly ONE git commit only for the task-related source changes.\n"
+            "Do NOT commit workflow artifacts (workflow/*) or unrelated files.\n"
+            "If repository policy/permissions prevent commit, report failure honestly and do not claim success.\n"
+            "After attempting commit, output:\n"
+            "1. Commit status (COMPLETED/SKIPPED/FAILED)\n"
+            "2. Commit message title\n"
+            "3. Commit message body\n"
+            "4. Commit hash (if completed)\n"
+            "5. Staged/committed files summary\n"
+            "6. Failure reason and next manual command suggestions (if failed)\n\n"
             f"Task:\n{self.args.task}\n\n"
             f"Allowed code directories:\n{self.render_code_dir_list()}\n\n"
             f"Codex plan:\n{plan_text}\n\n"
-            f"Final review:\n{final_review_text}\n"
+            f"Final review:\n{final_review_text}\n\n"
+            f"06 summary draft:\n{summary_text}\n"
         )
 
     def render_code_dir_list(self) -> str:
@@ -1006,7 +1164,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-dir", type=Path, default=Path("workflow"), help="Directory for workflow artifacts")
     parser.add_argument("--codex-model", default="gpt-5.3-codex", help="Model name for codex exec/review")
-    parser.add_argument("--codex-reasoning-effort", default="xhigh", help="Reasoning effort for codex exec/review")
+    parser.add_argument(
+        "--codex-reasoning-effort",
+        default="",
+        help="Fallback reasoning effort for Codex stages when a stage-specific effort is not provided.",
+    )
+    parser.add_argument("--codex-plan-reasoning-effort", default="xhigh", help="Reasoning effort for the Codex plan stage")
+    parser.add_argument("--codex-review-reasoning-effort", default="high", help="Reasoning effort for the Codex review stage")
+    parser.add_argument(
+        "--codex-final-review-reasoning-effort",
+        default="high",
+        help="Reasoning effort for the Codex final review stage",
+    )
+    parser.add_argument(
+        "--codex-wrapup-reasoning-effort",
+        default="medium",
+        help="Reasoning effort for the final summary/commit-note stage",
+    )
     parser.add_argument("--claude-model", default="haiku", help="Model name for claude")
     parser.add_argument("--codex-cmd", default=CODEX_CMD, help="Codex CLI path or command name")
     parser.add_argument("--claude-cmd", default=CLAUDE_CMD, help="Claude CLI path or command name")
@@ -1026,7 +1200,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="After a rejected final review, ask Claude to revise again and let Codex perform another final review.",
     )
-    parser.add_argument("--commit-on-success", action="store_true", help="Ask Codex to create one git commit after final review passes")
+    parser.add_argument(
+        "--commit-on-success",
+        action="store_true",
+        help="After 06 summary is generated, ask Codex to attempt one real git commit.",
+    )
     return parser
 
 

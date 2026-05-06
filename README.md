@@ -18,7 +18,8 @@ The tool then runs a structured review-driven workflow automatically:
 3. `Codex` reviews the result
 4. `Claude` revises if needed
 5. `Codex` performs the final review
-6. `Codex` can optionally create one git commit after the workflow succeeds
+6. `Codex` always generates one wrap-up Markdown report (including suggested commit message)
+7. If enabled, `Codex` can optionally attempt one real git commit after the wrap-up report
 
 This makes the implementation loop predictable, resumable, and suitable for repeated local engineering tasks.
 
@@ -38,11 +39,12 @@ This makes the implementation loop predictable, resumable, and suitable for repe
 - Windows GUI launcher
 - Multiple allowed code directories
 - Codex model selection
-- Codex reasoning effort selection
+- Stage-specific Codex reasoning effort selection (Plan/Review/Final/Wrap-up)
 - Claude model selection
 - Claude permission mode selection
-- Optional auto-commit on success
-- Real commit-success verification
+- Default wrap-up report generation on success (`06_codex_commit.md`)
+- Optional real git commit attempt after the wrap-up report
+- Clear stage status tracking for the wrap-up report phase
 - Task labels and task IDs
 - Current task state inside `workflow/`
 - Historical task archive inside `workflow_history/`
@@ -69,27 +71,28 @@ If you want to start a new task in a project that already contains an active wor
 3. Enter the new task label and new task description
 4. Click `Start` / `开始运行`
 
-## Auto-Commit Behavior
+## Wrap-up Summary Behavior
 
-If `auto-commit on success` is enabled:
+After final review is approved, the workflow always generates `06_codex_commit.md`:
 
-- the commit stage runs only after final review is approved
-- the commit stage is executed non-interactively, so it should not stop to ask for approval
-- the elevated execution behavior is limited to the `Codex commit` phase only
-- the workflow does **not** treat the existence of `06_codex_commit.md` as success by itself
-- the workflow verifies that a real git commit was created by checking repository state
+- the wrap-up stage runs only after final review is approved
+- Codex generates `06_codex_commit.md` with:
+  - workflow summary
+  - changed-file summary
+  - suggested commit title/body
+  - suggested git commands for manual execution
+- by default this stage is summary-only and does **not** run `git add` / `git commit` / `git push`
+- stage success depends on whether Codex successfully produced the report content
 
 This means:
 
-- approval popups should not block the commit phase anymore
-- if git still fails because of repository policy or local git configuration, the stage will fail honestly and record the reason in `06_codex_commit.md`
+- you still keep a consistent end-of-workflow artifact
+- actual git commit is always done manually by you, based on the suggested message/commands
 
-Examples of non-approval failures:
+If `optional real git commit` is enabled:
 
-- `git` user identity not configured
-- repository is not a valid git repository
-- commit signing / GPG policy blocks the commit
-- repository hooks or local policy reject the commit
+- after generating `06_codex_commit.md`, Codex attempts one real git commit
+- the commit result (completed/skipped/failed) is appended to `06_codex_commit.md`
 
 ## Do I Need Only The EXE?
 

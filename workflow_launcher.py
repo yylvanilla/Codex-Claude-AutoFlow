@@ -48,7 +48,7 @@ ARTIFACT_BUTTONS = [
     ("初审", "03_codex_review.md"),
     ("再修指导", "03_retry_codex_guidance.md"),
     ("终审", "05_codex_final_review.md"),
-    ("提交记录", "06_codex_commit.md"),
+    ("总结建议", "06_codex_commit.md"),
     ("日志", "run.log"),
 ]
 
@@ -59,7 +59,7 @@ STAGE_LABELS = {
     "retry_guidance": "Codex 再修指导",
     "revise": "Claude 修订",
     "final_review": "Codex 终审",
-    "commit": "Codex 提交",
+    "commit": "Codex 收尾总结",
 }
 
 WORKFLOW_STATUS_LABELS = {
@@ -117,7 +117,11 @@ class WorkflowLauncher:
         self.project_var = tk.StringVar(value=settings.get("project_dir", DEFAULT_PROJECT_DIR))
         self.task_label_var = tk.StringVar(value=settings.get("task_label", ""))
         self.codex_model_var = tk.StringVar(value=settings.get("codex_model", "gpt-5.3-codex"))
-        self.codex_effort_var = tk.StringVar(value=settings.get("codex_reasoning_effort", "xhigh"))
+        self.codex_effort_var = tk.StringVar(value=settings.get("codex_reasoning_effort", ""))
+        self.codex_plan_effort_var = tk.StringVar(value=settings.get("codex_plan_reasoning_effort", "xhigh"))
+        self.codex_review_effort_var = tk.StringVar(value=settings.get("codex_review_reasoning_effort", "high"))
+        self.codex_final_review_effort_var = tk.StringVar(value=settings.get("codex_final_review_reasoning_effort", "high"))
+        self.codex_wrapup_effort_var = tk.StringVar(value=settings.get("codex_wrapup_reasoning_effort", "medium"))
         self.claude_model_var = tk.StringVar(value=settings.get("claude_model", "haiku"))
         self.claude_permission_var = tk.StringVar(value=settings.get("claude_permission_mode", "acceptEdits"))
         self.commit_on_success_var = tk.BooleanVar(value=settings.get("commit_on_success", False))
@@ -186,17 +190,17 @@ class WorkflowLauncher:
             row=3, column=1, sticky="w", padx=(8, 8), pady=(12, 0)
         )
 
-        tk.Label(frame, text="Claude 模型选择").grid(row=3, column=2, sticky="w", pady=(12, 0))
+        tk.Label(frame, text="Claude 模型选择").grid(row=3, column=2, sticky="w", padx=(8, 0), pady=(12, 0))
         ttk.Combobox(frame, textvariable=self.claude_model_var, values=CLAUDE_MODELS, state="readonly", width=18).grid(
-            row=3, column=2, sticky="e", pady=(12, 0)
+            row=3, column=3, sticky="w", pady=(12, 0)
         )
 
-        tk.Label(frame, text="Codex 推理强度").grid(row=4, column=0, sticky="w", pady=(10, 0))
-        ttk.Combobox(frame, textvariable=self.codex_effort_var, values=CODEX_REASONING_EFFORTS, state="readonly", width=28).grid(
+        tk.Label(frame, text="Codex 推理强度（全局兜底）").grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Combobox(frame, textvariable=self.codex_effort_var, values=["", *CODEX_REASONING_EFFORTS], state="readonly", width=28).grid(
             row=4, column=1, sticky="w", padx=(8, 8), pady=(10, 0)
         )
 
-        tk.Label(frame, text="Claude 权限模式").grid(row=4, column=2, sticky="w", pady=(10, 0))
+        tk.Label(frame, text="Claude 权限模式").grid(row=4, column=2, sticky="w", padx=(8, 0), pady=(10, 0))
         permission_combo = ttk.Combobox(
             frame,
             textvariable=self.claude_permission_var,
@@ -204,26 +208,44 @@ class WorkflowLauncher:
             state="readonly",
             width=18,
         )
-        permission_combo.grid(row=4, column=2, sticky="e", pady=(10, 0))
+        permission_combo.grid(row=4, column=3, sticky="w", pady=(10, 0))
         permission_combo.bind("<<ComboboxSelected>>", lambda _event: self.update_permission_help())
 
-        tk.Label(frame, text="权限模式说明").grid(row=5, column=0, sticky="nw", pady=(8, 0))
+        tk.Label(frame, text="Codex Plan 推理强度").grid(row=5, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(frame, textvariable=self.codex_plan_effort_var, values=CODEX_REASONING_EFFORTS, state="readonly", width=28).grid(
+            row=5, column=1, sticky="w", padx=(8, 8), pady=(8, 0)
+        )
+        tk.Label(frame, text="Codex Review 推理强度").grid(row=5, column=2, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Combobox(frame, textvariable=self.codex_review_effort_var, values=CODEX_REASONING_EFFORTS, state="readonly", width=18).grid(
+            row=5, column=3, sticky="w", pady=(8, 0)
+        )
+
+        tk.Label(frame, text="Codex Final 推理强度").grid(row=6, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(frame, textvariable=self.codex_final_review_effort_var, values=CODEX_REASONING_EFFORTS, state="readonly", width=28).grid(
+            row=6, column=1, sticky="w", padx=(8, 8), pady=(8, 0)
+        )
+        tk.Label(frame, text="Codex Wrapup 推理强度").grid(row=6, column=2, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Combobox(frame, textvariable=self.codex_wrapup_effort_var, values=CODEX_REASONING_EFFORTS, state="readonly", width=18).grid(
+            row=6, column=3, sticky="w", pady=(8, 0)
+        )
+
+        tk.Label(frame, text="权限模式说明").grid(row=7, column=0, sticky="nw", pady=(8, 0))
         tk.Label(frame, textvariable=self.permission_help_var, justify=tk.LEFT, wraplength=760, anchor="w").grid(
-            row=5, column=1, columnspan=2, sticky="w", pady=(8, 0)
+            row=7, column=1, columnspan=3, sticky="w", pady=(8, 0)
         )
 
         tk.Checkbutton(
             frame,
-            text="这次任务成功后由 Codex 自动提交一次 commit（不提交 workflow 目录）",
+            text="在生成 06 总结文档后，再由 Codex 尝试执行真实 git commit（可选）",
             variable=self.commit_on_success_var,
-        ).grid(row=6, column=1, columnspan=2, sticky="w", pady=(10, 0))
+        ).grid(row=8, column=1, columnspan=3, sticky="w", pady=(10, 0))
 
-        tk.Label(frame, text="任务描述").grid(row=7, column=0, sticky="nw", pady=(12, 0))
+        tk.Label(frame, text="任务描述").grid(row=9, column=0, sticky="nw", pady=(12, 0))
         self.task_text = scrolledtext.ScrolledText(frame, wrap=tk.WORD, height=10)
-        self.task_text.grid(row=7, column=1, columnspan=2, sticky="nsew", pady=(12, 0))
+        self.task_text.grid(row=9, column=1, columnspan=3, sticky="nsew", pady=(12, 0))
 
         button_frame = tk.Frame(frame)
-        button_frame.grid(row=8, column=1, columnspan=2, sticky="w", pady=(12, 0))
+        button_frame.grid(row=10, column=1, columnspan=3, sticky="w", pady=(12, 0))
         self.run_button = tk.Button(button_frame, text="开始运行", width=14, command=self.start_workflow)
         self.run_button.pack(side=tk.LEFT)
         self.resume_button = tk.Button(button_frame, text="继续上次任务", width=14, command=self.resume_workflow)
@@ -236,7 +258,8 @@ class WorkflowLauncher:
         self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
 
         frame.columnconfigure(1, weight=1)
-        frame.rowconfigure(7, weight=1)
+        frame.columnconfigure(3, weight=1)
+        frame.rowconfigure(9, weight=1)
 
     def _build_log_panel(self, parent: tk.Frame) -> None:
         frame = tk.LabelFrame(parent, text="运行日志", padx=10, pady=10)
@@ -377,6 +400,10 @@ class WorkflowLauncher:
                 "task": self.task_text.get("1.0", tk.END).strip(),
                 "codex_model": self.codex_model_var.get().strip(),
                 "codex_reasoning_effort": self.codex_effort_var.get().strip(),
+                "codex_plan_reasoning_effort": self.codex_plan_effort_var.get().strip(),
+                "codex_review_reasoning_effort": self.codex_review_effort_var.get().strip(),
+                "codex_final_review_reasoning_effort": self.codex_final_review_effort_var.get().strip(),
+                "codex_wrapup_reasoning_effort": self.codex_wrapup_effort_var.get().strip(),
                 "claude_model": self.claude_model_var.get().strip(),
                 "claude_permission_mode": self.claude_permission_var.get().strip(),
                 "commit_on_success": self.commit_on_success_var.get(),
@@ -816,6 +843,10 @@ class WorkflowLauncher:
 
         codex_model = self.codex_model_var.get().strip()
         codex_effort = self.codex_effort_var.get().strip()
+        codex_plan_effort = self.codex_plan_effort_var.get().strip()
+        codex_review_effort = self.codex_review_effort_var.get().strip()
+        codex_final_review_effort = self.codex_final_review_effort_var.get().strip()
+        codex_wrapup_effort = self.codex_wrapup_effort_var.get().strip()
         claude_model = self.claude_model_var.get().strip()
         claude_permission = self.claude_permission_var.get().strip()
 
@@ -831,8 +862,16 @@ class WorkflowLauncher:
         if not task and (resume or retry_final_reject):
             messagebox.showerror("错误", "没有找到可恢复任务的历史任务描述。")
             return None
-        if not codex_model or not codex_effort or not claude_model or not claude_permission:
-            messagebox.showerror("错误", "请完整选择 Codex 和 Claude 的配置。")
+        if (
+            not codex_model
+            or not codex_plan_effort
+            or not codex_review_effort
+            or not codex_final_review_effort
+            or not codex_wrapup_effort
+            or not claude_model
+            or not claude_permission
+        ):
+            messagebox.showerror("错误", "请完整选择 Codex/Claude 的模型、权限和阶段推理强度。")
             return None
 
         orchestrator_args = [
@@ -846,6 +885,14 @@ class WorkflowLauncher:
             codex_model,
             "--codex-reasoning-effort",
             codex_effort,
+            "--codex-plan-reasoning-effort",
+            codex_plan_effort,
+            "--codex-review-reasoning-effort",
+            codex_review_effort,
+            "--codex-final-review-reasoning-effort",
+            codex_final_review_effort,
+            "--codex-wrapup-reasoning-effort",
+            codex_wrapup_effort,
             "--claude-model",
             claude_model,
             "--claude-permission-mode",
@@ -1068,21 +1115,21 @@ class WorkflowLauncher:
             self.append_log("\n=== 任务完成 ===\n")
             final_review = final_review_path.read_text(encoding="utf-8", errors="replace") if final_review_path.exists() else ""
             if "APPROVED" in final_review.upper():
-                if self.commit_on_success_var.get() and commit_stage_status == "completed":
-                    messagebox.showinfo("任务完成", "最终审查通过，并且已确认由 Codex 真正创建了 git commit。")
-                elif self.commit_on_success_var.get() and commit_stage_status == "skipped":
-                    messagebox.showinfo("任务完成", "最终审查通过，但没有检测到可提交的代码改动，所以跳过了 commit 阶段。")
-                elif self.commit_on_success_var.get() and commit_path.exists():
-                    messagebox.showwarning("任务完成", "最终审查通过，但 commit 阶段没有被标记为成功，请打开 06_codex_commit.md 检查原因。")
+                if commit_stage_status == "completed" and self.commit_on_success_var.get():
+                    messagebox.showinfo("任务完成", "最终审查通过，已生成 06_codex_commit.md，并已执行可选真实 git commit（请查看文档末尾结果）。")
+                elif commit_stage_status == "completed":
+                    messagebox.showinfo("任务完成", "最终审查通过，已生成 06_codex_commit.md（工作流总结 + commit 提交说明建议）。")
+                elif commit_path.exists():
+                    messagebox.showwarning("任务完成", "最终审查通过，检测到 06_codex_commit.md，但阶段状态未标记为 completed，请手动检查文档内容。")
                 else:
-                    messagebox.showinfo("任务完成", "最终审查通过，任务已完成。")
+                    messagebox.showwarning("任务完成", "最终审查通过，但未检测到 06_codex_commit.md，请检查 run.log。")
             else:
                 messagebox.showwarning("任务完成", "任务已结束，但没有检测到明确的 APPROVED。")
         else:
             self.status_var.set(f"运行失败，退出码 {returncode}")
             self.append_log(f"\n=== 任务失败，退出码 {returncode} ===\n")
             if commit_stage_status == "failed":
-                messagebox.showerror("任务失败", "最终审查虽然通过了，但 Codex 没有真正完成 git commit。请打开 06_codex_commit.md 查看原因。")
+                messagebox.showerror("任务失败", "终审通过后收尾阶段失败：可能是 06 总结文档生成失败，或可选真实 git commit 失败。请打开 run.log 和 06_codex_commit.md 查看原因。")
             elif final_review_path.exists() and "REJECTED" in final_review_path.read_text(encoding="utf-8", errors="replace").upper():
                 messagebox.showerror("任务失败", "最终审查未通过，结果为 REJECTED。")
             else:
