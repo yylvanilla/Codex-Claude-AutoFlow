@@ -927,12 +927,17 @@ class WorkflowRunner:
     def build_review_prompt(self, plan_text: str, implementation_text: str) -> str:
         return (
             "You are Codex. Review the current workspace code after Claude's implementation.\n"
+            "This review report is an internal machine-to-machine artifact for the workflow and Claude.\n"
+            "Do NOT address the user directly. Do NOT ask questions. Do NOT offer optional next steps.\n"
             "Inspect the actual files on disk, not just a proposed patch, and produce a Markdown review report with at least:\n"
             "1. Whether the code satisfies the task\n"
             "2. Potential bugs or risks\n"
             "3. Style or architecture concerns\n"
             "4. Required fixes vs optional improvements\n"
-            "5. Whether Claude should revise the code before final approval\n\n"
+            "5. Whether Claude should revise the code before final approval\n"
+            "6. A final single-line decision marker exactly in one of these forms:\n"
+            "   REVIEW_DECISION: REVISE_REQUIRED\n"
+            "   REVIEW_DECISION: APPROVED\n\n"
             f"Task:\n{self.args.task}\n\n"
             f"Allowed code directories:\n{self.render_code_dir_list()}\n\n"
             f"Original plan:\n{plan_text}\n\n"
@@ -957,11 +962,15 @@ class WorkflowRunner:
     def build_final_review_prompt(self, plan_text: str, implementation_text: str, revision_text: str) -> str:
         return (
             "You are Codex. Perform a final review of the current workspace code after Claude's revision.\n"
+            "This final review is an internal machine-to-machine artifact for workflow control.\n"
+            "Do NOT address the user directly. Do NOT ask questions. Do NOT offer optional follow-up actions.\n"
             "Inspect the actual files and output a Markdown final review containing:\n"
             "1. Final verdict\n"
             "2. Remaining risks, if any\n"
             "3. Test or manual verification recommendations\n"
-            "4. A clear line stating either 'APPROVED' or 'REJECTED'\n\n"
+            "4. A final single-line decision marker exactly in one of these forms:\n"
+            "   FINAL_REVIEW_DECISION: APPROVED\n"
+            "   FINAL_REVIEW_DECISION: REJECTED\n\n"
             f"Task:\n{self.args.task}\n\n"
             f"Allowed code directories:\n{self.render_code_dir_list()}\n\n"
             f"Original plan:\n{plan_text}\n\n"
@@ -1129,6 +1138,22 @@ class WorkflowRunner:
 
     @staticmethod
     def review_allows_completion(review_text: str) -> bool:
+        decision = WorkflowRunner.parse_decision_marker(
+            review_text,
+            "REVIEW_DECISION",
+            ("approved", "rejected", "revise_required"),
+        )
+        if decision:
+            return decision == "approved"
+
+        final_decision = WorkflowRunner.parse_decision_marker(
+            review_text,
+            "FINAL_REVIEW_DECISION",
+            ("approved", "rejected"),
+        )
+        if final_decision:
+            return final_decision == "approved"
+
         lowered = review_text.lower()
         if "rejected" in lowered:
             return False
@@ -1138,6 +1163,16 @@ class WorkflowRunner:
 
     @staticmethod
     def review_requests_revision(review_text: str) -> bool:
+        decision = WorkflowRunner.parse_decision_marker(
+            review_text,
+            "REVIEW_DECISION",
+            ("approved", "rejected", "revise_required"),
+        )
+        if decision == "approved":
+            return False
+        if decision in ("rejected", "revise_required"):
+            return True
+
         lowered = review_text.lower()
         if "approved" in lowered and "should revise" not in lowered and "needs revision" not in lowered:
             return False
@@ -1151,6 +1186,24 @@ class WorkflowRunner:
             "requires revision",
         )
         return any(marker in lowered for marker in revision_markers) or not WorkflowRunner.review_allows_completion(review_text)
+
+    @staticmethod
+    def parse_decision_marker(review_text: str, marker_name: str, allowed_values: tuple[str, ...]) -> str:
+        prefix = marker_name.lower() + ":"
+        allowed = {value.lower() for value in allowed_values}
+        for raw_line in review_text.splitlines():
+            line = raw_line.strip()
+            lowered = line.lower()
+            if not lowered.startswith(prefix):
+                continue
+            value_part = line[len(marker_name) + 1 :].strip().lower()
+            if not value_part:
+                return ""
+            token = value_part.split()[0].strip("`*_.,;:()[]{}")
+            if token in allowed:
+                return token
+            return ""
+        return ""
 
     @staticmethod
     def resolve_command(raw: str) -> str:
