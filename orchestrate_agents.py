@@ -366,6 +366,45 @@ class WorkflowRunner:
         self.save_manifest()
         return CommandResult(args=args, returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
 
+    @staticmethod
+    def detect_claude_error_text(stdout_text: str, stderr_text: str) -> str:
+        combined = "\n".join(part for part in (stdout_text, stderr_text) if part).strip()
+        if not combined:
+            return ""
+        lowered = combined.lower()
+        first_line = combined.splitlines()[0].strip().lower()
+        prefix_markers = (
+            "api error:",
+            "anthropic api error",
+            "error:",
+            "request failed",
+            "authentication error",
+            "invalid api key",
+        )
+        token_markers = (
+            '"type":"new_api_error"',
+            '"type": "new_api_error"',
+            '"code":"model_not_found"',
+            '"code": "model_not_found"',
+            "model_not_found",
+        )
+        if any(first_line.startswith(marker) for marker in prefix_markers):
+            return combined.splitlines()[0].strip()
+        if any(marker in lowered for marker in token_markers):
+            return "detected_api_error_payload"
+        return ""
+
+    def ensure_claude_stage_success(self, result: CommandResult, stage_name: str, stage_label: str, **extra: Any) -> str:
+        output = result.stdout.strip()
+        error_hint = self.detect_claude_error_text(result.stdout, result.stderr)
+        if result.returncode != 0 or not output or error_hint:
+            stage_payload: dict[str, Any] = {"returncode": result.returncode, **extra}
+            if error_hint:
+                stage_payload["error"] = error_hint
+            self.set_stage(stage_name, "failed", **stage_payload)
+            raise WorkflowError(f"Claude {stage_label} stage failed")
+        return output
+
     def build_codex_exec_args(self, output_path: Path) -> list[str]:
         args = [str(self.codex_cmd), "exec", "--cd", str(self.primary_code_dir), "--output-last-message", str(output_path)]
         if self.args.codex_model:
@@ -496,11 +535,7 @@ class WorkflowRunner:
         artifact = self.artifact_path(IMPLEMENTATION_FILE)
         self.set_stage("implement", "running", artifact=str(artifact))
         result = self.run_command(self.build_claude_implement_args(), cwd=self.project_dir, stdin_text=prompt)
-        if result.returncode != 0 or not result.stdout.strip():
-            self.set_stage("implement", "failed", returncode=result.returncode)
-            raise WorkflowError("Claude implementation stage failed")
-
-        implementation_text = result.stdout.strip()
+        implementation_text = self.ensure_claude_stage_success(result, "implement", "implementation")
         self.write_artifact(IMPLEMENTATION_FILE, implementation_text)
         diff_text = self.snapshot_git_diff(IMPLEMENTATION_DIFF_FILE)
         self.set_stage(
@@ -537,11 +572,7 @@ class WorkflowRunner:
         artifact = self.artifact_path(REVISION_FILE)
         self.set_stage("revise", "running", artifact=str(artifact))
         result = self.run_command(self.build_claude_revise_args(), cwd=self.project_dir, stdin_text=prompt)
-        if result.returncode != 0 or not result.stdout.strip():
-            self.set_stage("revise", "failed", returncode=result.returncode)
-            raise WorkflowError("Claude revision stage failed")
-
-        revision_text = result.stdout.strip()
+        revision_text = self.ensure_claude_stage_success(result, "revise", "revision")
         self.write_artifact(REVISION_FILE, revision_text)
         diff_text = self.snapshot_git_diff(REVISION_DIFF_FILE)
         self.set_stage(
@@ -619,11 +650,12 @@ class WorkflowRunner:
         artifact = self.artifact_path(REVISION_FILE)
         self.set_stage("revise", "running", artifact=str(artifact), retry_round=retry_round)
         result = self.run_command(self.build_claude_revise_args(), cwd=self.project_dir, stdin_text=prompt)
-        if result.returncode != 0 or not result.stdout.strip():
-            self.set_stage("revise", "failed", returncode=result.returncode, retry_round=retry_round)
-            raise WorkflowError("Claude retry revision stage failed")
-
-        revision_text = result.stdout.strip()
+        revision_text = self.ensure_claude_stage_success(
+            result,
+            "revise",
+            "retry revision",
+            retry_round=retry_round,
+        )
         self.write_artifact(REVISION_FILE, revision_text)
         self.write_artifact(self.retry_history_file(retry_round, REVISION_FILE), revision_text)
         diff_text = self.snapshot_git_diff(REVISION_DIFF_FILE)
