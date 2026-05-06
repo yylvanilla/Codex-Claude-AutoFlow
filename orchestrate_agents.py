@@ -831,8 +831,27 @@ class WorkflowRunner:
         result = self.run_command(self.build_codex_git_commit_args(output_path), cwd=self.project_dir, stdin_text=prompt)
         commit_text = read_text_if_exists(output_path) or result.stdout
         head_after = self.git_head_commit()
+        remaining_status = self.git_status_porcelain(*self.relative_code_dir_args()).stdout.strip()
 
         if head_after and head_after != head_before:
+            if remaining_status:
+                return {
+                    "status": "failed",
+                    "reason": "remaining_changes_after_commit",
+                    "returncode": result.returncode or 1,
+                    "head_before": head_before,
+                    "head_after": head_after,
+                    "report": (
+                        "A git commit was created, but there are still uncommitted changes "
+                        "under the allowed code directories. Commit stage requires all allowed "
+                        "changes to be included in the single commit.\n\n"
+                        f"Commit hash: {head_after}\n\n"
+                        "Remaining git status in allowed code directories:\n"
+                        f"{remaining_status}\n\n"
+                        "Codex output:\n"
+                        f"{(commit_text or '').strip() or '(empty)'}\n"
+                    ),
+                }
             return {
                 "status": "completed",
                 "returncode": result.returncode,
@@ -1054,8 +1073,9 @@ class WorkflowRunner:
         return (
             "You are Codex. Now perform the optional REAL git commit step.\n"
             "Operate in the current repository.\n"
-            "Create exactly ONE git commit only for the task-related source changes.\n"
-            "Do NOT commit workflow artifacts (workflow/*) or unrelated files.\n"
+            "Create exactly ONE git commit that includes ALL current changes under the allowed code directories.\n"
+            "Do NOT leave any staged/unstaged/untracked changes under the allowed code directories after commit.\n"
+            "Do NOT commit workflow artifacts (workflow/*) or files outside the allowed code directories.\n"
             "If repository policy/permissions prevent commit, report failure honestly and do not claim success.\n"
             "After attempting commit, output:\n"
             "1. Commit status (COMPLETED/SKIPPED/FAILED)\n"
